@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, openSync, readSync, statSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { pageRetainedFile, readBoundedTail, tailTerminalDisplay, terminalDisplayRows } from "./shared-log-utils.js";
+import { logTimestamp, pageRetainedFile, readBoundedTail, tailTerminalDisplay, terminalDisplayRows } from "./shared-log-utils.js";
 import type { FilePageRequest, PageResult } from "./shared-log-utils.js";
 import type { BackgroundTaskMeta, CommandResult } from "./types.js";
 
@@ -14,7 +14,7 @@ export function appendWatchResult(logPath: string, result: CommandResult): void 
   const capture = result.captureTruncated
     ? ` capture_discarded_stdout=${result.stdoutDiscardedBytes ?? 0} capture_discarded_stderr=${result.stderrDiscardedBytes ?? 0}`
     : "";
-  const header = `\n--- check ${new Date(result.startedAt).toISOString()} exit=${result.exitCode ?? "null"} signal=${result.signal ?? "null"} duration_ms=${result.endedAt - result.startedAt}${capture} ---\n`;
+  const header = `\n--- check ${logTimestamp(result.startedAt)} exit=${result.exitCode ?? "null"} signal=${result.signal ?? "null"} duration_ms=${result.endedAt - result.startedAt}${capture} ---\n`;
   appendFileSync(logPath, header);
   if (result.stdout) appendFileSync(logPath, result.stdout.endsWith("\n") ? result.stdout : `${result.stdout}\n`);
   if (result.stderr) appendFileSync(logPath, `[stderr]\n${result.stderr.endsWith("\n") ? result.stderr : `${result.stderr}\n`}`);

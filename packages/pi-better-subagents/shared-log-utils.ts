@@ -888,6 +888,42 @@ export function sessionScopeKey(input: {
 }
 
 /**
+ * Timestamp for a log separator line (`--- spawn … ---`, `--- exit … ---`,
+ * `--- check … ---`).
+ *
+ * A retained log mixes two writers: the harness writes separators and the
+ * task's own stdout/stderr is appended verbatim, carrying whatever clock the
+ * program inside the task prints — usually local wall-clock. A bare
+ * `toISOString()` separator is therefore read against that local output as a
+ * different time base, and a reader computes a gap that does not exist. The
+ * observed case: a task whose own last line was stamped `18:17:37.328` was
+ * followed by `--- exit 2026-10-12T01:17:37.336Z ---` — 8 ms apart, read as
+ * seven hours, and reported as a task that "completed twice at different
+ * times".
+ *
+ * Emit both representations with an explicit zone label so the line is
+ * unambiguous whichever clock the reader is holding.
+ */
+export function logTimestamp(at?: Date | number): string {
+  const date = at === undefined ? new Date() : at instanceof Date ? at : new Date(at);
+  const utc = date.toISOString();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: undefined, // the machine's local zone, resolved explicitly rather than inherited
+    hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(date).reduce<Record<string, string>>((acc, part) => {
+    if (part.type !== "literal") acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const zone = new Intl.DateTimeFormat("en-US", { timeZone: undefined, timeZoneName: "short" })
+    .formatToParts(date)
+    .find((part) => part.type === "timeZoneName")?.value ?? "";
+  const local = `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  return zone ? `${utc} (${local} ${zone})` : `${utc} (${local})`;
+}
+
+/**
  * Identity facts of a retained log for a content revision: device, inode,
  * size, and whole-millisecond mtime, or the read error. A deleted, replaced,
  * or appended log is a content change.

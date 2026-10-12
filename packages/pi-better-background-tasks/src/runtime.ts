@@ -8,6 +8,7 @@ import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
+import { logTimestamp } from "./shared-log-utils.js";
 import { takeRecoverySnapshot } from "./shared-sandbox-core.js";
 import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
@@ -276,7 +277,7 @@ export function spawnTask(
   scheduleLogRetention(id);
   if (tmuxBacked && remoteTask) {
     activeRemoteTasks.set(id, remoteTask);
-    appendLine(logPath, `--- remote tmux bootstrap ${new Date(now).toISOString()} target=${remoteTask.metadata.ssh.target} session=${remoteTask.metadata.remote.sessionName} ---`);
+    appendLine(logPath, `--- remote tmux bootstrap ${logTimestamp(now)} target=${remoteTask.metadata.ssh.target} session=${remoteTask.metadata.remote.sessionName} ---`);
     void launchRemoteTmux(pi, id, remoteTask, getActiveSession);
   } else if (spawned) {
     spawned.child.unref();
@@ -545,7 +546,7 @@ export function startWatchTask(
     ...intent,
   };
   ensureTaskDir(id);
-  appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
+  appendLine(meta.logPath, `--- watch ${logTimestamp(now)} interval_ms=${meta.intervalMs} ---`);
   for (const line of sandboxNotices) appendLine(meta.logPath, `--- ${line} ---`);
   writeMeta(meta);
   let resolveFirst!: (check: FirstWatchCheck | "suspended" | undefined) => void;
@@ -951,7 +952,7 @@ async function pollWatch(
       const reason = meta.ssh ? `SSH poll to ${meta.ssh.target} failed: ${detail}` : detail;
       if (meta.ssh) {
         meta.error = reason;
-        appendLine(meta.logPath, `--- poll error ${new Date().toISOString()} ---\n${reason}`);
+        appendLine(meta.logPath, `--- poll error ${logTimestamp()} ---\n${reason}`);
       }
       recordFailure(meta, "watch-poll", reason, `throw:${meta.lastCheckedAt ?? meta.startedAt}`, { category: meta.ssh ? "ssh" : "execution" });
       finalize(meta, { status: "failed", reason }, pi, getActiveSession);

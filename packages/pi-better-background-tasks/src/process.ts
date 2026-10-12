@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
+import { logTimestamp } from "./shared-log-utils.js";
 import type { CommandResult, CommandSpec } from "./types.js";
 
 /** Known Git for Windows locations; `bash -lc` needs a real bash, not the WSL shim. */
@@ -120,7 +121,7 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
     stdio = ["ignore", fd, fd];
   }
   const child = spawnArgs(launchSpec, detached, stdio);
-  const marker = `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`;
+  const marker = `\n--- spawn ${logTimestamp()} pid=${child.pid ?? "unknown"} ---\n`;
   try {
     if (fd !== undefined) {
       writeSync(fd, marker);
@@ -143,14 +144,14 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
   child.on("error", (error) => {
     try {
       const code = (error as NodeJS.ErrnoException).code ?? "unknown";
-      appendFileSync(logPath, `\n--- spawn error ${new Date().toISOString()} code=${code} message=${error.message} ---\n`);
+      appendFileSync(logPath, `\n--- spawn error ${logTimestamp()} code=${code} message=${error.message} ---\n`);
     } catch {
       // Log unavailable; the runtime close handler still records the failure.
     }
   });
   child.on("close", (code, signal) => {
     try {
-      appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+      appendFileSync(logPath, `\n--- exit ${logTimestamp()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
     } catch {
       // Log unavailable (swept tmp dir, ACL change): a throw here would crash
       // the host; the runtime already finalized the task from meta.
