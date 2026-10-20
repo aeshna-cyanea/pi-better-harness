@@ -119,6 +119,25 @@ function metaShapeProblem(meta: unknown, id: string): string | undefined {
 }
 
 /**
+ * Settle a terminal task's completion callback as delivered, because the agent
+ * has just read the task itself. Returns the delivery moment when this call is
+ * the one that settles it, and undefined when the task is still running or the
+ * callback was already sent or suppressed -- callers use the return value to run
+ * the follow-up work exactly once.
+ *
+ * A running task never settles: reading it says nothing about how it ended, and
+ * the wakeup for that is still owed.
+ */
+export function settleCallbackAsDelivered(id: string, at = Date.now()): number | undefined {
+  const meta = readMeta(id);
+  if (!meta || !isTerminalStatus(meta.status) || meta.callback === false) return undefined;
+  if (meta.callbackSentAt !== undefined || meta.callbackSuppressedAt !== undefined) return undefined;
+  meta.callbackSentAt = at;
+  writeMeta(meta);
+  return at;
+}
+
+/**
  * Distinguish missing, unreadable, and healthy metadata. Callers must not treat
  * an unreadable file as proof that a task does not exist.
  */

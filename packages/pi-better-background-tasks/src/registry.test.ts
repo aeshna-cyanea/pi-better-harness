@@ -1,6 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { baseDir, ensureTaskDir, taskDir, getRegistryIoMetrics, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
+import { baseDir, ensureTaskDir, taskDir, getRegistryIoMetrics, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, settleCallbackAsDelivered, writeMeta } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 describe("registry meta sweep cache", () => {
@@ -40,6 +40,42 @@ describe("registry meta sweep cache", () => {
     writeMeta({ ...meta, dismissedAt: 123 });
 
     expect(listMetas().find((candidate) => candidate.id === meta.id)?.dismissedAt).toBe(123);
+  });
+});
+
+describe("a read settles the completion callback (Key 273)", () => {
+  it("settles a terminal task exactly once and reports the moment", () => {
+    const meta = fixtureMeta("succeeded", "read settles");
+    // The fixture defaults to callback:false (no wakeup wanted); this row asks for one.
+    meta.callback = true;
+    writeMeta(meta);
+    expect(meta.callbackSentAt).toBeUndefined();
+
+    expect(settleCallbackAsDelivered(meta.id, 1_700_000_000_000)).toBe(1_700_000_000_000);
+    expect(readMeta(meta.id)?.callbackSentAt).toBe(1_700_000_000_000);
+    // Non-vacuity: a second read is not a second delivery, and it must not move
+    // the moment the batcher would compare against.
+    expect(settleCallbackAsDelivered(meta.id, 1_700_000_000_001)).toBeUndefined();
+    expect(readMeta(meta.id)?.callbackSentAt).toBe(1_700_000_000_000);
+  });
+
+  it("leaves a running task owed its wakeup", () => {
+    const meta = fixtureMeta("running", "running is not an answer");
+    writeMeta(meta);
+    // Reading a running task says nothing about how it ended, so the callback is
+    // still owed -- this is the case a naive "any read counts" rule gets wrong.
+    expect(settleCallbackAsDelivered(meta.id)).toBeUndefined();
+    expect(readMeta(meta.id)?.callbackSentAt).toBeUndefined();
+  });
+
+  it("never overwrites a suppression the policy already recorded", () => {
+    const meta = fixtureMeta("cancelled", "cancelled stays suppressed");
+    meta.callbackSuppressedAt = 1_700_000_000_000;
+    meta.callbackSuppressedReason = "task was cancelled; no completion callback is needed";
+    writeMeta(meta);
+    expect(settleCallbackAsDelivered(meta.id)).toBeUndefined();
+    expect(readMeta(meta.id)?.callbackSentAt).toBeUndefined();
+    expect(readMeta(meta.id)?.callbackSuppressedReason).toContain("cancelled");
   });
 });
 

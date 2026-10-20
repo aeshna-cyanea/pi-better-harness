@@ -10,6 +10,7 @@ import {
   incidentResource,
   incidentVerbatimPage,
   isIncidentCursor,
+  markFailureAttentionDelivered,
   quietFailureLine,
   readFailureState,
   scopedFailures,
@@ -37,9 +38,9 @@ import {
   type EvidenceGap,
   type VerbatimPage,
 } from "./shared-log-utils.js";
-import { failurePath } from "./failures.js";
+import { failurePath, terminalFailureAttention } from "./failures.js";
 import { captureGapsFor, pageTaskLog, readLog, type LogRead } from "./logs.js";
-import { belongsToOrigin, inspectMeta, listTaskRecords, originOf, type MetaInspection } from "./registry.js";
+import { belongsToOrigin, inspectMeta, listTaskRecords, originOf, settleCallbackAsDelivered, type MetaInspection } from "./registry.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition, FirstWatchCheck } from "./types.js";
 
 /** The launch tool stopped waiting while a watch's first check was still running (#359). */
@@ -618,6 +619,24 @@ function excerptPage(meta: BackgroundTaskMeta, options: OutputOptions, log: LogR
   };
 }
 
+/**
+ * Reading a terminal task **is** the delivery. The agent has the result in front
+ * of it, so waking it again for the same fact is noise, and the batcher's own
+ * `isDelivered()` already reads `callbackSentAt` as the answer. Marked through the
+ * same fields `onDelivered` uses -- failure attention included -- so the pending
+ * count, the batcher and the incident ledger all agree the result landed.
+ */
+function noteTerminalResultRead(meta: BackgroundTaskMeta, options: OutputOptions): void {
+  // Only the owning session may settle its own wakeup. `all:true` lets me *read*
+  // another session's task; reading it must not silence the wakeup that session
+  // is still owed.
+  if (!options.origin || options.sessionUnavailable || !belongsToOrigin(meta, options.origin)) return;
+  const at = settleCallbackAsDelivered(meta.id);
+  if (at === undefined) return;
+  const pending = terminalFailureAttention(meta.id);
+  if (pending) markFailureAttentionDelivered(failurePath(meta.id), pending, at);
+}
+
 export function formatStatus(
   inspection: MetaInspection | BackgroundTaskMeta | undefined,
   idOrOptions?: string | OutputOptions,
@@ -629,6 +648,7 @@ export function formatStatus(
   const meta = inspectionValue.meta;
   const ownership = classifyOwnership(meta, options);
   if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
+  noteTerminalResultRead(meta, options);
   if (isIncidentCursor(options.cursor) || options.history) return assembleIncidentPage(meta, options);
   // A page cursor from another view of this task continues that view instead
   // of resetting a status revision (#323): a raw/file cursor pages the log,
@@ -696,6 +716,7 @@ export function formatLog(id: string, options: OutputOptions = {}): string {
   const meta = inspection.meta;
   const ownership = classifyOwnership(meta, options);
   if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
+  noteTerminalResultRead(meta, options);
   const fileCursor = cursorKind(options.cursor) === "f";
   const raw = options.raw === true || options.tailLines === 0 || fileCursor;
   // Raw evidence keeps whole excerpts and evidence paths.

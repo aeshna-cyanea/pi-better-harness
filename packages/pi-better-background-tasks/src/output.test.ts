@@ -14,7 +14,7 @@ import {
   formatStatus,
   utf8ByteLength,
 } from "./output.js";
-import { inspectMeta, logPathFor, metaPathFor, taskDir, writeMeta } from "./registry.js";
+import { inspectMeta, logPathFor, metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
 import { registerTools } from "./tools.js";
 import { ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
@@ -848,5 +848,35 @@ describe("#332 navigator rows", () => {
     recordFailure(loud, "exit", "exited with code 2", "l1");
     row = provider.listRows(Date.now()).find((x: any) => x.id === loud.id);
     expect(row.primary).toMatch(/Action required/);
+  });
+});
+
+describe("reading a terminal task settles its completion callback (Key 273)", () => {
+  it("settles on a status read, which is the batcher's own delivered predicate", () => {
+    const meta = fixture({ name: "settled by a read", callback: true });
+    expect(meta.callbackSentAt).toBeUndefined();
+
+    expect(formatStatus(inspectMeta(meta.id), { origin })).toContain("succeeded");
+    const after = readMeta(meta.id);
+    // isDelivered() in notifyTerminal reads exactly this pair, so a number here
+    // is what stops the queued wakeup from firing at the next boundary.
+    expect(after?.callbackSentAt).toBeTypeOf("number");
+  });
+
+  it("settles on a log read as well, and never on a running task", () => {
+    const logged = fixture({ name: "settled by a log read", callback: true, logLines: ["done"] });
+    formatLog(logged.id, { origin });
+    expect(readMeta(logged.id)?.callbackSentAt).toBeTypeOf("number");
+
+    const running = fixture({ name: "running stays owed", status: "running", endedAt: undefined, callback: true });
+    formatStatus(inspectMeta(running.id), { origin });
+    expect(readMeta(running.id)?.callbackSentAt).toBeUndefined();
+  });
+
+  it("does not settle a task another session owns", () => {
+    const meta = fixture({ name: "foreign task", callback: true });
+    // all:true lets me read it; it does not make its wakeup mine to answer for.
+    formatStatus(inspectMeta(meta.id), { origin: otherOrigin, all: true });
+    expect(readMeta(meta.id)?.callbackSentAt).toBeUndefined();
   });
 });
