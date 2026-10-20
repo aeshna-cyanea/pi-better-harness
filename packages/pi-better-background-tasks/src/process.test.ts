@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runCommandOnce } from "./process.js";
+import { runCommandOnce, withSleepInhibit } from "./process.js";
 
 const originalShell = process.env.SHELL;
 const tempDirs: string[] = [];
@@ -92,5 +92,101 @@ describe("process shell execution", () => {
     const buffer = Buffer.from("é");
     expect(utf8PrefixLength(buffer, 1)).toBe(0);
     expect(utf8PrefixLength(buffer, 2)).toBe(2);
+  });
+});
+
+const launch = { execPath: "/bin/bash", execArgs: ["-lc", "sleep 5"] };
+const linux = { platform: "linux" as const, inhibitAvailable: true };
+
+describe("a task holds its own sleep inhibitor", () => {
+  // @covers background-task.sleep-inhibit
+  // @level unit
+  it("runs the real command after the inhibitor flags, unchanged", () => {
+    const wrapped = withSleepInhibit(launch, "background task", { ...linux, setting: true });
+    expect(wrapped.execPath).toBe("systemd-inhibit");
+    expect(wrapped.execArgs).toEqual([
+      "--what=sleep",
+      "--who=pi-better-background-tasks",
+      "--why=background task",
+      "--mode=block",
+      "/bin/bash",
+      "-lc",
+      "sleep 5",
+    ]);
+  });
+
+  // @covers background-task.sleep-inhibit
+  // @level unit
+  it("is absent, not failed, where there is no systemd-inhibit to hold a lock", () => {
+    for (const platform of ["darwin", "win32", "freebsd"] as const) {
+      expect(withSleepInhibit(launch, "why", { platform, setting: true, inhibitAvailable: true })).toEqual(launch);
+    }
+    expect(withSleepInhibit(launch, "why", { platform: "linux", setting: true, inhibitAvailable: false })).toEqual(launch);
+  });
+
+  // @covers background-task.sleep-inhibit
+  // @level unit
+  it("obeys the knob, and fails toward protection when the knob is unreadable", () => {
+    for (const off of [false, { enabled: false }]) {
+      expect(withSleepInhibit(launch, "why", { ...linux, setting: off })).toEqual(launch);
+    }
+    // Absent means on, and so does anything this package cannot read: a malformed
+    // setting is a configuration mistake, not a licence to suspend mid-task.
+    for (const on of [undefined, true, null, { enabled: true }, {}, "no", []]) {
+      expect(withSleepInhibit(launch, "why", { ...linux, setting: on }).execPath).toBe("systemd-inhibit");
+    }
+  });
+
+  // @covers background-task.sleep-inhibit
+  // @level integration
+  it("really holds the lock for the lifetime of the process it launched", async () => {
+    const { existsSync } = await import("node:fs");
+    const { delimiter } = await import("node:path");
+    const onPath = (process.env.PATH ?? "").split(delimiter).some((d) => d && existsSync(join(d, "systemd-inhibit")));
+    if (process.platform !== "linux" || !onPath) return;
+
+    // Ask from inside the task's own process tree. The assertion is about *this*
+    // task's inhibitor, not about the global list: the suite runs test files in
+    // parallel, and other files launch real tasks that hold rows of their own, so
+    // "nobody else is holding a lock" is not a fact a test here may rely on.
+    const probe = [
+      'printf "%s %s %s\\n" "$PPID" "$(ps -o comm= -p "$PPID")"',
+      '"$(systemd-inhibit --list --no-pager 2>/dev/null | awk -v p="$PPID" \'$4==p\' | wc -l)"',
+    ].join(" ");
+    const during = await runCommandOnce({ command: probe });
+    expect(during.exitCode).toBe(0);
+    const [pidText, parentComm, rowsDuring] = during.stdout.trim().split(/\s+/);
+    expect(parentComm).toBe("systemd-inhibit");
+    expect(Number(rowsDuring)).toBe(1);
+    const pid = Number(pidText);
+    expect(Number.isInteger(pid) && pid > 1).toBe(true);
+
+    // The row is gone once the process is, with nothing to clean up by hand. The
+    // probe that checks afterwards must not hold a lock of its own, or it counts
+    // its own row and proves nothing.
+    const after = await runCommandOnce({
+      command: `systemd-inhibit --list --no-pager 2>/dev/null | awk -v p=${pid} '$4==p' | wc -l`,
+      inhibitSleep: false,
+    });
+    expect(Number(after.stdout.trim())).toBe(0);
+  });
+
+  // @covers background-task.sleep-inhibit
+  // @level integration
+  it("still stops a task that is wrapped, and leaves no process behind", async () => {
+    if (process.platform !== "linux") return;
+    const marker = "PI_BG_SURVIVOR_CHECK";
+    const result = await runCommandOnce({
+      shell: false,
+      argv: [process.execPath, "-e", `globalThis.${marker}=1; setInterval(() => {}, 10_000)`],
+    }, undefined, 25);
+    expect(result.timedOut).toBe(true);
+    // The bracket keeps pgrep from matching its own command line, which carries
+    // the pattern as text.
+    const survivors = await runCommandOnce({
+      command: "pgrep -fa '[P]I_BG_SURVIVOR_CHECK' | wc -l",
+      inhibitSleep: false,
+    });
+    expect(Number(survivors.stdout.trim())).toBe(0);
   });
 });

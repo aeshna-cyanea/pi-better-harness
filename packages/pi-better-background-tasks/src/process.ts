@@ -3,6 +3,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync }
 import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { CommandResult, CommandSpec } from "./types.js";
+import { readHarnessSetting } from "./shared-harness-settings.js";
 
 /** Known Git for Windows locations; `bash -lc` needs a real bash, not the WSL shim. */
 const WINDOWS_BASH_CANDIDATES = [
@@ -41,6 +42,98 @@ export function resolveDefaultShell(): string {
   // Nothing usable found: keep the POSIX default so the failure surfaces as a
   // logged spawn error for the task instead of crashing the whole host process.
   return "/bin/bash";
+}
+
+/** The inhibitor lock's owner, as it appears in `systemd-inhibit --list`. */
+const SLEEP_INHIBIT_WHO = "pi-better-background-tasks";
+/** The knob that turns it off: `piBetterHarness.backgroundTasksSleepInhibit`. */
+const SLEEP_INHIBIT_SETTING = "backgroundTasksSleepInhibit";
+
+export interface SleepInhibitSeams {
+  /** The raw configured value. Pass it (including as `undefined`) to decide without reading settings. */
+  setting?: unknown;
+  platform?: NodeJS.Platform;
+  inhibitAvailable?: boolean;
+}
+
+/**
+ * A background task outlives the agent turn that started it, and the keep-awake
+ * extensions release their inhibitor at `agent_end`. On a laptop that means a lid
+ * close, or an idle timeout, suspends the machine *mid-task*: the task's process is
+ * frozen, its ssh or ping dies with the network stack, and what comes back reads
+ * like the command's own fault. Measured on a laptop: lid closed 23:31:26 with no
+ * lock held, suspended one second later; the same lid closed 23:37:24 with a
+ * `block` lock on `sleep` held, and the journal shows no suspend at all.
+ *
+ * So the task holds its own inhibitor. `systemd-inhibit` runs the launch as its
+ * child and the lock lives exactly as long as that process, so there is no
+ * bookkeeping to leak: a stopped task, a crashed task, and a host that takes its own
+ * extension down with it all release the lock, because the kernel closes an
+ * inhibitor when its process goes. Stopping still reaches the task — SIGTERM to
+ * `systemd-inhibit` takes its child with it (measured), and a detached task leads a
+ * process group that `stopProcessGroup` signals wholesale regardless.
+ *
+ * `--what=sleep` only, deliberately. `handle-lid-switch` is already held in block
+ * mode by the desktop's own power daemon, which drives the lid itself, and the
+ * measurement above says logind refuses the `Suspend()` it asks for. Claiming the
+ * trigger as well would buy a desktop complaint on every lid close to cover a case
+ * the operation lock already covers.
+ */
+function sleepInhibitEnabled(setting: unknown): boolean {
+  if (setting === undefined || setting === null) return true;
+  if (typeof setting === "boolean") return setting;
+  if (typeof setting === "object" && !Array.isArray(setting)) {
+    const enabled = (setting as Record<string, unknown>).enabled;
+    if (typeof enabled === "boolean") return enabled;
+  }
+  // A value this package cannot read is a configuration mistake, not a licence to
+  // suspend: keep the protection, and let the settings surface show what was written.
+  return true;
+}
+
+let inhibitAvailability: boolean | undefined;
+
+function systemdInhibitAvailable(): boolean {
+  if (inhibitAvailability === undefined) {
+    const separator = process.platform === "win32" ? ";" : ":";
+    inhibitAvailability = (process.env.PATH ?? "").split(separator).some(
+      (dir) => dir.trim() !== "" && existsSync(join(dir.trim(), "systemd-inhibit")),
+    );
+  }
+  return inhibitAvailability;
+}
+
+/**
+ * Wrap a launch so it holds a sleep inhibitor for its own lifetime.
+ *
+ * Returns the launch unchanged on a platform without `systemd-inhibit`, or with the
+ * knob off: the wrapper is absent there, never a failed spawn. The real command is
+ * still the thing that runs, after the inhibitor flags, so cwd, env, stdio and
+ * process-group semantics are untouched.
+ *
+ * Exposed for tests, and `seams` exists so a test can prove the argv for a platform
+ * the host is not — the same reason `confineCommandSpec` is exported.
+ */
+export function withSleepInhibit(
+  launch: { execPath: string; execArgs: string[] },
+  why: string,
+  seams: SleepInhibitSeams = {},
+): { execPath: string; execArgs: string[] } {
+  if ((seams.platform ?? process.platform) !== "linux") return launch;
+  const setting = Object.hasOwn(seams, "setting") ? seams.setting : readHarnessSetting(SLEEP_INHIBIT_SETTING);
+  if (!sleepInhibitEnabled(setting)) return launch;
+  if (!(seams.inhibitAvailable ?? systemdInhibitAvailable())) return launch;
+  return {
+    execPath: "systemd-inhibit",
+    execArgs: [
+      "--what=sleep",
+      `--who=${SLEEP_INHIBIT_WHO}`,
+      `--why=${why}`,
+      "--mode=block",
+      launch.execPath,
+      ...launch.execArgs,
+    ],
+  };
 }
 
 /** How long a timed-out process group has to exit on SIGTERM before SIGKILL. */
@@ -186,7 +279,7 @@ export function runCommandOnce(
 ): Promise<CommandResult> {
   validateCommandSpec(spec);
   const startedAt = Date.now();
-  const child = spawnArgs(spec, true, ["ignore", "pipe", "pipe"]);
+  const child = spawnArgs(spec, true, ["ignore", "pipe", "pipe"], "background task check");
   const cap = Math.max(1, Math.floor(maxBufferBytes));
   const stdoutCapture = createCaptureBuffer();
   const stderrCapture = createCaptureBuffer();
@@ -418,10 +511,13 @@ function spawnArgs(
   spec: CommandSpec,
   detached: boolean,
   stdio: SpawnStdio,
+  inhibitReason = "background task",
 ): ChildProcess {
   const env = { ...process.env, ...spec.env };
-  const { execPath, execArgs } = commandExecution(spec);
-  return spawn(execPath, execArgs, {
+  const launch = withSleepInhibit(commandExecution(spec), inhibitReason, {
+    ...(spec.inhibitSleep === undefined ? {} : { setting: spec.inhibitSleep }),
+  });
+  return spawn(launch.execPath, launch.execArgs, {
     cwd: spec.cwd,
     env,
     detached,

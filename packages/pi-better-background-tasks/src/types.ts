@@ -26,6 +26,12 @@ export interface CommandSpec {
   loginShell?: boolean;
   cwd?: string;
   env?: Record<string, string>;
+  /**
+   * Override whether this launch holds a sleep inhibitor for its own lifetime. A
+   * boolean wins over the `backgroundTasksSleepInhibit` setting; absent defers to
+   * it. See `withSleepInhibit` in process.ts for what the lock is for.
+   */
+  inhibitSleep?: boolean;
 }
 
 export interface CommandResult {

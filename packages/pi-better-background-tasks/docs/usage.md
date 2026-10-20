@@ -289,6 +289,41 @@ Three properties follow:
 a sandbox. `command` and `argv` stay the operator's own request, so status,
 navigator, and goal surfaces read the same as before.
 
+## Sleep And Long-Running Tasks
+
+A background task outlives the agent turn that started it, and keep-awake
+extensions release their inhibitor when that turn ends. On a laptop that means a
+lid close, or an idle timeout, suspends the machine mid-task: the task's process
+is frozen, its ssh or ping dies with the network stack, and what comes back reads
+like the command's own fault.
+
+So each task holds its own inhibitor. On Linux, when `systemd-inhibit` is on PATH,
+the launch runs as `systemd-inhibit --what=sleep --who=pi-better-background-tasks
+--why=background task --mode=block <the real command>`. The lock lives exactly as
+long as that process, so there is nothing to clean up: a stopped task, a crashed
+task, and a host that takes its own extension down with it all release the lock,
+because the kernel closes an inhibitor when its process goes. Stop semantics are
+unchanged — a signal to `systemd-inhibit` takes its child with it, and a detached
+task leads a process group that is signalled wholesale regardless.
+
+Only `sleep` is claimed. `handle-lid-switch` is deliberately left alone: the
+desktop's own power daemon already holds it in block mode and drives the lid
+itself, and logind refuses the suspend it asks for, so claiming the trigger as
+well would only make the desktop complain on every lid close.
+
+Turn it off in `/harness-settings`, or in `settings.json` under
+`piBetterHarness`:
+
+```json
+{ "piBetterHarness": { "backgroundTasksSleepInhibit": false } }
+```
+
+The key accepts `true`/`false` or `{ "enabled": true|false }`. **Absent means on**,
+and so does a value this package cannot read: a malformed setting is a
+configuration mistake, not a licence to suspend mid-task. A per-launch override is
+available to callers as `inhibitSleep` on the command spec, and it wins over the
+setting.
+
 ## Log Retention
 
 Background processes retain at most 4 MiB of raw output by default. When output
